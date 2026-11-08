@@ -1,4 +1,4 @@
-# 🛠️ Rancang Bangun Sistem Informasi Helpdesk dan Penugasan Teknisi Berbasis Web
+# Rancang Bangun Sistem Informasi Helpdesk dan Penugasan Teknisi Berbasis Web
 
 Aplikasi web helpdesk dan manajemen penugasan lapangan yang dirancang khusus untuk mengoptimalkan layanan pelanggan serta mempermudah koordinasi tugas teknisi di **PT. Gerak Maju Abadi**. 
 
@@ -6,7 +6,7 @@ Proyek ini dikembangkan sebagai bagian dari Laporan Magang / Praktik Kerja Lapan
 
 ---
 
-## ✨ Fitur Utama
+## Fitur Utama
 * **Portal Publik (Pelanggan):** Memungkinkan pelanggan mengirimkan laporan kendala atau keluhan mandiri secara *real-time* lengkap dengan unggah foto kondisi awal dan fitur "Salin Nomor" tiket untuk konfirmasi via WhatsApp.
 * **Portal Login Karyawan:** Sistem autentikasi berbasis database cloud untuk membedakan hak akses (*role-based access control*) secara otomatis.
 * **Dashboard Admin:** Pusat kendali untuk memonitor seluruh tiket masuk, rekap tanggal request dan tanggal selesai, melihat foto dokumentasi awal & bukti, serta manajemen data karyawan (*CRUD*).
@@ -15,13 +15,13 @@ Proyek ini dikembangkan sebagai bagian dari Laporan Magang / Praktik Kerja Lapan
 
 ---
 
-## 💻 Tech Stack & Arsitektur
+## Tech Stack & Arsitektur
 * **Frontend:** HTML5, Tailwind CSS (via CDN), Lucide Icons, Vanilla JavaScript.
 * **Backend & Database:** Supabase (Cloud PostgreSQL Database & Storage Buckets).
 * **Deployment:** GitHub Pages.
 
 ---
 
-## 🚀 Status Proyek
+## Status Proyek
 * **Status:** *Production / Live*
 * **Instansi:** PT. Gerak Maju Abadi
