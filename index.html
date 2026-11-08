@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#4f46e5">
+<title>Laporan Teknisi PT. Gerak Maju Abadi</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+  body { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+  .fade-in { animation: fi .2s ease-out; }
+  @keyframes fi { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  .spin { animation: sp .8s linear infinite; } @keyframes sp { to { transform: rotate(360deg); } }
+  .blob { animation: bl 14s ease-in-out infinite alternate; }
+  @keyframes bl { from { transform: translate(0,0) scale(1); } to { transform: translate(30px,-20px) scale(1.12); } }
+  input, select, textarea { font-size: 16px; } /* cegah zoom otomatis di iOS */
+  .glass { background: rgba(255,255,255,.62); backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px); border: 1px solid rgba(255,255,255,.75); box-shadow: 0 20px 50px -20px rgba(49,46,129,.28); }
+  .no-scrollbar::-webkit-scrollbar { display: none; } .no-scrollbar { scrollbar-width: none; }
+</style>
+</head>
+<body class="bg-slate-50 text-slate-800 min-h-screen">
+<div id="app"></div>
+<div id="modal-root"></div>
+<div id="toast" aria-live="polite" class="fixed top-4 left-1/2 -translate-x-1/2 z-[100] pointer-events-none w-[92vw] max-w-md"></div>
+
+<script>
+/* =====================================================
+   HELPDESK & LAYANAN LAPANGAN + SUPABASE
+   Tabel: `ardi` (karyawan) dan `helpdesk_tickets` (tiket)
+   ===================================================== */
+const SUPABASE_URL = 'https://mbzrjiuhqqevsqslhjvp.supabase.co'; // URL dasar, tanpa /rest/v1/
+const SUPABASE_KEY = 'sb_publishable_AanlI_T1vCdJv2oTJFLWfA_9viy1_Hf';
+const T_USERS = 'ardi';
+const T_TICKETS = 'helpdesk_tickets';
+const SESSION_KEY = 'helpdesk_email';
+const TICKET_LIMIT = 300;   // batasi jumlah tiket yang dimuat (foto disimpan base64, jadi cukup berat)
+const REFRESH_MS = 30000;   // auto-refresh 30 detik
+
+let sb = null;
+try { sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY); } catch (e) { console.error(e); }
+
+/* ---------- konstanta ---------- */
+const ROLE_BADGE = { admin: 'bg-violet-100 text-violet-700', kepala: 'bg-indigo-100 text-indigo-700', teknisi: 'bg-sky-100 text-sky-700' };
+const STATUS_CLS = {
+  Masuk:      'bg-slate-100 text-slate-700',
+  Ditugaskan: 'bg-amber-100 text-amber-800',
+  Proses:     'bg-indigo-100 text-indigo-800',
+  Selesai:    'bg-emerald-100 text-emerald-800',
+};
+const STATUS_BAR = { Masuk: 'bg-slate-400', Ditugaskan: 'bg-amber-400', Proses: 'bg-indigo-500', Selesai: 'bg-emerald-500' };
+const STEPS = ['Masuk', 'Ditugaskan', 'Proses', 'Selesai'];
+const PRIO = {
+  Darurat: { cls: 'bg-red-100 text-red-700 ring-red-200', dot: 'bg-red-500', bar: 'border-l-red-500', w: 0 },
+  Sedang:  { cls: 'bg-yellow-100 text-yellow-800 ring-yellow-200', dot: 'bg-yellow-400', bar: 'border-l-yellow-400', w: 1 },
+  Normal:  { cls: 'bg-blue-100 text-blue-700 ring-blue-200', dot: 'bg-blue-500', bar: 'border-l-blue-500', w: 2 },
+};
+
+/* ---------- util ---------- */
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const fmt = (ts) => ts ? new Date(ts).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '-';
+function rel(ts) {
+  if (!ts) return '';
+  const m = Math.max(0, Math.round((Date.now() - new Date(ts).getTime()) / 60000));
+  if (m < 1) return 'baru saja';
+  if (m < 60) return m + ' menit lalu';
+  if (m < 1440) return Math.floor(m / 60) + ' jam lalu';
+  return Math.floor(m / 1440) + ' hari lalu';
+}
+const initials = (n) => String(n || '?').split(' ').filter(Boolean).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+const norm = (s) => String(s ?? '').trim().toLowerCase();
+const tno = (t) => { const s = String(t.id); return s.length > 10 ? 'T-' + s.slice(0, 6).toUpperCase() : 'T-' + s; };
+const emp = (r, k) => r[k] ?? '';
+const isImg = (s) => typeof s === 'string' && (s.startsWith('data:image') || /^https?:\/\//.test(s));
+const icon = (name, cls = 'w-4 h-4') => `<i data-lucide="${name}" class="${cls}"></i>`;
+const refreshIcons = () => { try { if (window.lucide) window.lucide.createIcons(); } catch (e) {} };
+function roleOf(jabatan) {
+  const j = norm(jabatan);
+  if (j === 'kepala teknisi') return 'kepala';
+  if (j === 'teknisi') return 'teknisi';
+  if (j === 'manager operasional' || j === 'admin') return 'admin';
+  return null;
+}
+
+/* ---------- state ---------- */
+const S = { view: 'home', user: null, tickets: [], emps: [], loading: false, booting: false, busyLoad: false, failing: false, lastOk: true, sig: '', techTab: 'aktif', filter: 'Semua', q: '', submitted: null };
+// Sub-langkah teknisi "Mulai Perjalanan" disimpan lokal di perangkat teknisi,
+// karena kolom `status` hanya punya 4 nilai: Masuk/Ditugaskan/Proses/Selesai.
+const stepStore = {
+  get: (id) => { try { return JSON.parse(localStorage.getItem('helpdesk_step') || '{}')[id] || null; } catch (e) { return null; } },
+  set: (id, v) => { try { const o = JSON.parse(localStorage.getItem('helpdesk_step') || '{}'); if (v) o[id] = v; else delete o[id]; localStorage.setItem('helpdesk_step', JSON.stringify(o)); } catch (e) {} },
+};
+
+/* ---------- UI helpers ---------- */
+function toast(msg, err) {
+  const t = $('toast');
+  t.innerHTML = `<div class="fade-in flex items-start gap-3 ${err ? 'bg-red-600' : 'bg-slate-900'} text-white text-sm px-4 py-3 rounded-2xl shadow-2xl">
+    <span class="mt-0.5 shrink-0">${icon(err ? 'circle-alert' : 'circle-check', 'w-5 h-5')}</span><span>${esc(msg)}</span></div>`;
+  refreshIcons();
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.innerHTML = '', err ? 6000 : 2800);
+}
+function dbErr(e, ctx) {
+  console.error(ctx, e);
+  const m = (e && (e.message || e.details)) || 'Terjadi kesalahan';
+  const rls = e && (e.code === '42501' || /row-level security|permission denied|RLS/i.test(m));
+  const net = /failed to fetch|networkerror|load failed|network request failed/i.test(m);
+  const tbl = e && (e.code === '42P01' || e.code === 'PGRST205' || /does not exist|could not find the table/i.test(m)) && !/column/i.test(m);
+  const cm = /column|schema cache/i.test(m) ? m.match(/foto_profil|completed_at|feedback/) : null;
+  const dup = e && (e.code === '23505' || /duplicate key/i.test(m));
+  toast(rls ? `${ctx}: akses ditolak Supabase (cek kebijakan RLS tabel).`
+        : net ? `${ctx}: tidak dapat terhubung ke server. Periksa koneksi internet.`
+        : tbl ? `${ctx}: tabel tidak ditemukan di Supabase (cek nama tabel).`
+        : cm ? `${ctx}: kolom "${cm[0]}" belum ada di tabel Supabase. Tambahkan kolom tersebut.`
+        : dup ? `${ctx}: data duplikat (email atau kode karyawan sudah terdaftar).`
+        : `${ctx}: ${m}`, true);
+}
+function openModal(html, wide) {
+  pendingPhoto = null; // jangan bawa sisa foto dari form lain
+  $('modal-root').innerHTML = `
+  <div class="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-slate-900/50 backdrop-blur-sm p-0 sm:p-4" onclick="if(event.target===this)closeModal()">
+    <div role="dialog" aria-modal="true" class="fade-in bg-white w-full ${wide ? 'sm:max-w-2xl' : 'sm:max-w-lg'} max-h-[92vh] overflow-y-auto rounded-t-3xl sm:rounded-3xl shadow-2xl">${html}</div>
+  </div>`;
+  document.body.style.overflow = 'hidden';
+  refreshIcons();
+}
+function closeModal() { $('modal-root').innerHTML = ''; document.body.style.overflow = ''; pendingPhoto = null; }
+const modalHead = (title, sub) => `
+  <div class="sticky top-0 bg-white/95 backdrop-blur flex items-start justify-between gap-3 px-5 pt-5 pb-3 border-b border-slate-100 z-10">
+    <div class="min-w-0"><h3 class="text-lg font-bold">${title}</h3>${sub ? `<p class="text-sm text-slate-500">${sub}</p>` : ''}</div>
+    <button onclick="closeModal()" aria-label="Tutup" class="shrink-0 w-9 h-9 rounded-full bg-slate-100 hover:bg-slate-200 text-slate-600 grid place-items-center">${icon('x', 'w-4 h-4')}</button>
+  </div>`;
+const prioBadge = (p) => { const x = PRIO[p] || PRIO.Normal; return `<span class="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full ring-1 ${x.cls}"><span class="w-1.5 h-1.5 rounded-full ${x.dot}"></span>${esc(p || 'Normal')}</span>`; };
+const statusBadge = (s, label) => `<span class="inline-block text-xs font-semibold px-2.5 py-1 rounded-full whitespace-nowrap ${STATUS_CLS[s] || 'bg-slate-100 text-slate-700'}">${esc(label || s)}</span>`;
+const spinner = '<svg class="spin w-4 h-4" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="3" opacity=".25"/><path d="M22 12a10 10 0 0 0-10-10" stroke="currentColor" stroke-width="3" stroke-linecap="round"/></svg>';
+const btnP = 'inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition active:scale-95 bg-indigo-600 text-white hover:bg-indigo-700 shadow-lg shadow-indigo-600/20 disabled:opacity-60 disabled:cursor-not-allowed';
+const btnG = 'inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-semibold transition active:scale-95 bg-slate-100 text-slate-700 hover:bg-slate-200 disabled:opacity-60';
+const inp = 'w-full rounded-xl border border-slate-300/80 bg-white/90 px-3.5 py-2.5 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500';
+const lbl = 'block text-sm font-medium text-slate-700 mb-1.5';
+function setBusy(btn, busy, text) {
+  if (!btn) return;
+  if (busy) { btn.dataset.t = btn.innerHTML; btn.disabled = true; btn.innerHTML = spinner + (text || 'Memproses...'); }
+  else { btn.disabled = false; if (btn.dataset.t) btn.innerHTML = btn.dataset.t; }
+}
+function stepper(status) {
+  const idx = STEPS.indexOf(status);
+  return `<div class="flex items-center gap-1">` + STEPS.map((s, i) =>
+    `<span class="h-1.5 w-5 rounded-full ${idx >= i ? (status === 'Selesai' ? 'bg-emerald-500' : 'bg-indigo-500') : 'bg-slate-200'}"></span>`).join('') + `</div>`;
+}
+function avatar(foto, nama, size = 'w-9 h-9', text = 'text-sm') {
+  return isImg(foto)
+    ? `<img src="${esc(foto)}" alt="${esc(nama)}" class="${size} rounded-full object-cover ring-2 ring-white shadow shrink-0">`
+    : `<span class="${size} ${text} rounded-full bg-gradient-to-br from-indigo-500 to-violet-500 text-white font-bold grid place-items-center ring-2 ring-white shadow shrink-0">${esc(initials(nama))}</span>`;
+}
+function thumb(t, field) {
+  const src = t[field];
+  if (!isImg(src)) return `<span class="text-xs text-slate-400">-</span>`;
+  return `<button onclick="viewPhoto('${esc(t.id)}','${field}')" aria-label="Lihat foto" class="block"><img src="${esc(src)}" alt="foto" class="w-12 h-12 object-cover rounded-lg ring-1 ring-slate-200 hover:ring-indigo-400"></button>`;
+}
+function viewPhoto(id, field) { const t = S.tickets.find(x => String(x.id) === String(id)); if (t && isImg(t[field])) viewImg(t[field]); }
+function viewImg(src) { openModal(`${modalHead('Foto')}<div class="p-4"><img src="${esc(src)}" class="w-full rounded-2xl"></div>`); }
+
+/* ---------- foto: baca + kompres (disimpan sebagai data URL / base64) ---------- */
+let pendingPhoto = null;
+function readPhoto(file, max = 800, square = false) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onerror = rej;
+    fr.onload = () => {
+      const img = new Image();
+      img.onerror = rej;
+      img.onload = () => {
+        const c = document.createElement('canvas'), ctx = c.getContext('2d');
+        if (square) {
+          const s = Math.min(img.width, img.height), sx = (img.width - s) / 2, sy = (img.height - s) / 2;
+          c.width = c.height = Math.min(max, s);
+          ctx.drawImage(img, sx, sy, s, s, 0, 0, c.width, c.height);
+        } else {
+          const r = Math.min(1, max / Math.max(img.width, img.height));
+          c.width = Math.round(img.width * r); c.height = Math.round(img.height * r);
+          ctx.drawImage(img, 0, 0, c.width, c.height);
+        }
+        res(c.toDataURL('image/jpeg', 0.78));
+      };
+      img.src = fr.result;
+    };
+    fr.readAsDataURL(file);
+  });
+}
+async function onPhotoPick(input, previewId) {
+  const f = input.files && input.files[0]; if (!f) return;
+  try {
+    pendingPhoto = await readPhoto(f);
+    $(previewId).innerHTML = `<img src="${pendingPhoto}" class="w-full max-h-56 object-cover rounded-2xl ring-1 ring-slate-200">`;
+  } catch (e) { toast('Gagal membaca foto. Coba format JPG atau PNG.', true); }
+}
+const photoField = (id, label, hint) => `
+  <div>
+    <label class="${lbl}">${label}</label>
+    <label class="flex flex-col items-center justify-center gap-1 border-2 border-dashed border-slate-300 rounded-2xl py-5 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/50 text-slate-500 bg-white/50">
+      ${icon('camera', 'w-6 h-6')}<span class="text-sm font-medium">Ambil / pilih foto</span><span class="text-xs">${hint || ''}</span>
+      <input type="file" accept="image/*" class="hidden" onchange="onPhotoPick(this,'${id}')">
+    </label>
+    <div id="${id}" class="mt-3"></div>
+  </div>`;
+
+/* =====================================================
+   DATA (Supabase)
+   ===================================================== */
+function makeSig(tickets, emps) {
+  const a = tickets.map(t => [t.id, t.status, t.teknisi_email, t.prioritas, t.completed_at, (t.feedback || '').length, (t.foto_awal || '').length, (t.foto_bukti || '').length].join('|')).join(';');
+  const b = (emps || []).map(r => [r.id, r['Kode Karyawan'], r.email, r['Nama'], r['Jabatan'], r['Supervisor'], (r.foto_profil || '').length].join('|')).join(';');
+  return a + '#' + b;
+}
+async function loadData(quiet) {
+  if (!sb || !S.user) return;
+  if (quiet && S.busyLoad) return;
+  S.busyLoad = true;
+  if (!quiet) { S.loading = true; render(); }
+  let changed = true, ok = true;
+  try {
+    let q = sb.from(T_TICKETS).select('*').order('created_at', { ascending: false }).limit(TICKET_LIMIT);
+    if (S.user.role === 'teknisi') q = q.eq('teknisi_email', S.user.email);
+    const tq = await q;
+    if (tq.error) throw tq.error;
+    let emps = null;
+    if (S.user.role !== 'teknisi') {
+      const eq = await sb.from(T_USERS).select('*');
+      if (eq.error) throw eq.error;
+      emps = eq.data || [];
+    }
+    if (!S.user) { S.busyLoad = false; return; } // logout saat memuat
+    const sig = makeSig(tq.data || [], emps);
+    changed = sig !== S.sig; S.sig = sig;
+    S.tickets = tq.data || []; if (emps) S.emps = emps;
+    S.failing = false;
+  } catch (e) {
+    ok = false; changed = false;
+    if (!quiet || !S.failing) dbErr(e, quiet ? 'Auto-refresh gagal' : 'Gagal memuat data');
+    S.failing = true;
+  }
+  S.lastOk = ok; S.loading = false; S.busyLoad = false;
+  if (!quiet || changed) render();
+}
+async function manualRefresh() { await loadData(false); if (S.lastOk) toast('Data diperbarui'); }
+// `where` = syarat tambahan agar tidak menimpa perubahan orang lain (misal status harus masih 'Masuk')
+async function updateTicket(id, patch, where) {
+  let q = sb.from(T_TICKETS).update(patch).eq('id', id);
+  if (where) q = q.match(where);
+  const { data, error } = await q.select();
+  if (error) throw error;
+  if (!data || !data.length) throw new Error('Tiket tidak berubah. Mungkin sudah diubah pihak lain, atau diblokir kebijakan RLS.');
+  return data[0];
+}
+const rowToUser = (row, role) => ({ email: row.email, nama: row['Nama'] || row.email, jabatan: row['Jabatan'], kode: row['Kode Karyawan'], supervisor: row['Supervisor'], foto: row.foto_profil || null, role });
+async function findEmployee(email) {
+  const { data, error } = await sb.from(T_USERS).select('*').ilike('email', email.replace(/[\\%_]/g, '\\$&')).limit(5);
+  if (error) throw error;
+  return (data || []).find(r => norm(r.email) === norm(email)) || null;
+}
+
+/* =====================================================
+   LANDING: PELAPORAN PUBLIK + LOGIN
+   ===================================================== */
+function go(v) { S.view = v; S.submitted = null; pendingPhoto = null; render(); window.scrollTo(0, 0); }
+function publicShell(inner) {
+  return `
+  <header class="bg-white/90 backdrop-blur border-b border-slate-200 sticky top-0 z-30">
+    <div class="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between gap-3">
+      <button onclick="go('home')" class="flex items-center gap-2.5 font-bold min-w-0"><span class="w-9 h-9 rounded-xl bg-indigo-600 text-white grid place-items-center shrink-0">${icon('wrench', 'w-4 h-4')}</span><span class="truncate text-sm sm:text-base">PT. Gerak Maju Abadi</span></button>
+      <div class="flex gap-2 shrink-0">
+        ${S.view !== 'home' ? `<button onclick="go('home')" class="${btnG} !py-2">Beranda</button>` : ''}
+        ${S.view !== 'login' ? `<button onclick="go('login')" class="${btnP} !py-2">Login Karyawan</button>` : ''}
+      </div>
+    </div>
+  </header>
+  <main class="max-w-5xl mx-auto px-4 py-8 pb-20 fade-in">${inner}</main>`;
+}
+function homeView() {
+  return publicShell(`
+  <div class="text-center max-w-2xl mx-auto mb-10">
+    <span class="inline-block text-xs font-semibold tracking-wide text-indigo-700 bg-indigo-100 rounded-full px-3 py-1 mb-4">HELPDESK &amp; LAYANAN TEKNISI LAPANGAN</span>
+    <h1 class="text-3xl sm:text-4xl font-extrabold leading-tight">Laporan Teknisi PT. Gerak Maju Abadi</h1>
+    <p class="text-slate-500 mt-3">Pilih layanan di bawah ini.</p>
+  </div>
+  <div class="grid md:grid-cols-2 gap-4 max-w-3xl mx-auto">
+    <button onclick="go('lapor')" class="text-left bg-white rounded-2xl border border-slate-200 p-6 hover:border-indigo-400 hover:shadow-lg transition group">
+      <span class="w-12 h-12 rounded-2xl bg-red-100 text-red-600 grid place-items-center mb-4">${icon('megaphone', 'w-6 h-6')}</span>
+      <h2 class="text-lg font-bold group-hover:text-indigo-700">Form Pelaporan Publik</h2>
+      <p class="text-sm text-slate-500 mt-1">Untuk pelanggan, tanpa login. Kirim keluhan dan dapatkan nomor tiket.</p>
+      <span class="inline-block mt-4 text-sm font-semibold text-indigo-600">Buat laporan →</span>
+    </button>
+    <button onclick="go('login')" class="text-left bg-white rounded-2xl border border-slate-200 p-6 hover:border-indigo-400 hover:shadow-lg transition group">
+      <span class="w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-600 grid place-items-center mb-4">${icon('lock-keyhole', 'w-6 h-6')}</span>
+      <h2 class="text-lg font-bold group-hover:text-indigo-700">Login Karyawan</h2>
+      <p class="text-sm text-slate-500 mt-1">Untuk Admin, Kepala Teknisi, dan Anggota Teknisi. Masuk dengan email kantor.</p>
+      <span class="inline-block mt-4 text-sm font-semibold text-indigo-600">Masuk dashboard →</span>
+    </button>
+  </div>`);
+}
+function laporView() {
+  if (S.submitted) {
+    const no = S.submitted.no;
+    return publicShell(`
+    <div class="max-w-md mx-auto bg-white rounded-2xl border border-slate-200 p-8 text-center">
+      <div class="w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 grid place-items-center mx-auto">${icon('circle-check', 'w-9 h-9')}</div>
+      <h2 class="text-xl font-extrabold mt-4">Laporan berhasil dikirim</h2>
+      <p class="text-sm text-slate-500 mt-1">${no ? 'Simpan nomor tiket Anda untuk referensi.' : 'Laporan Anda sudah diterima petugas.'}</p>
+      <div class="my-5 rounded-2xl bg-indigo-50 border border-indigo-100 py-5">
+        <div class="text-xs text-indigo-600 font-semibold uppercase tracking-wide">Nomor Tiket</div>
+        <div class="text-3xl font-black text-indigo-700 mt-1 font-mono break-all px-2">${no ? esc(no) : 'Menunggu petugas'}</div>
+      </div>
+      <p class="text-sm text-slate-500 mb-5">Kepala Teknisi akan segera menugaskan teknisi ke lokasi Anda.</p>
+      <div class="flex flex-wrap gap-2 justify-center">
+        ${no ? `<button onclick="copyText('${esc(no)}')" class="${btnG}">${icon('copy', 'w-4 h-4')}Salin Nomor</button>` : ''}
+        <button onclick="S.submitted=null;render()" class="${btnP}">Buat Laporan Lagi</button>
+        <button onclick="go('home')" class="${btnG}">Beranda</button>
+      </div>
+    </div>`);
+  }
+  const prio = (p, cls) => `<label class="cursor-pointer"><input type="radio" name="prio" value="${p}" class="peer sr-only" ${p === 'Normal' ? 'checked' : ''}>
+    <span class="block text-center rounded-xl border py-2.5 text-sm font-bold transition ${cls}">${p}</span></label>`;
+  return publicShell(`
+  <div class="max-w-xl mx-auto">
+    <h1 class="text-2xl font-extrabold">Form Pelaporan Publik</h1>
+    <p class="text-slate-500 text-sm mb-6">Isi data berikut. Tidak perlu login.</p>
+    <form id="report-form" onsubmit="submitReport(event)" class="bg-white rounded-2xl border border-slate-200 p-5 sm:p-6 space-y-4">
+      <div><label class="${lbl}">Nama Pelanggan / Toko <span class="text-red-500">*</span></label><input id="r-nama" class="${inp}" required maxlength="120" placeholder="Contoh: Toko Sinar Elektronik"></div>
+      <div><label class="${lbl}">Lokasi / Alamat <span class="text-red-500">*</span></label><textarea id="r-lokasi" rows="2" class="${inp}" required maxlength="300" placeholder="Alamat lengkap + patokan"></textarea></div>
+      <div><label class="${lbl}">Prioritas <span class="text-red-500">*</span></label>
+        <div class="grid grid-cols-3 gap-2">
+          ${prio('Darurat', 'bg-red-50 text-red-600 border-red-200 peer-checked:bg-red-500 peer-checked:text-white peer-checked:border-red-500 peer-checked:shadow-lg peer-checked:shadow-red-500/30')}
+          ${prio('Sedang', 'bg-yellow-50 text-yellow-700 border-yellow-200 peer-checked:bg-yellow-400 peer-checked:text-yellow-950 peer-checked:border-yellow-400 peer-checked:shadow-lg peer-checked:shadow-yellow-400/40')}
+          ${prio('Normal', 'bg-blue-50 text-blue-700 border-blue-200 peer-checked:bg-blue-600 peer-checked:text-white peer-checked:border-blue-600 peer-checked:shadow-lg peer-checked:shadow-blue-600/30')}
+        </div>
+        <p class="text-xs text-slate-400 mt-1.5">Darurat: berhenti total / berbahaya. Sedang: mengganggu. Normal: bisa dijadwalkan.</p>
+      </div>
+      <div><label class="${lbl}">Rincian Keluhan <span class="text-red-500">*</span></label><textarea id="r-keluhan" rows="4" class="${inp}" required minlength="8" maxlength="1000" placeholder="Jelaskan kendala yang dialami..."></textarea></div>
+      ${photoField('r-foto', 'Foto Kondisi (opsional)', 'Membantu teknisi memahami masalah')}
+      <button id="r-btn" class="${btnP} w-full py-3">Kirim Laporan</button>
+    </form>
+  </div>`);
+}
+function loginView() {
+  return publicShell(`
+  <div class="max-w-md mx-auto">
+    <div class="bg-white rounded-2xl border border-slate-200 p-6 sm:p-8">
+      <span class="w-12 h-12 rounded-2xl bg-indigo-100 text-indigo-600 grid place-items-center mb-4">${icon('lock-keyhole', 'w-6 h-6')}</span>
+      <h1 class="text-2xl font-extrabold">Login Karyawan</h1>
+      <p class="text-slate-500 text-sm mt-1 mb-6">Masukkan email kantor Anda. Dashboard ditentukan otomatis dari jabatan di data karyawan.</p>
+      <form onsubmit="doLogin(event)" class="space-y-4">
+        <div><label class="${lbl}">Email</label><input id="l-email" type="email" required class="${inp}" placeholder="nama@email.com" autocomplete="email" autocapitalize="none"></div>
+        <button id="l-btn" class="${btnP} w-full py-3">Masuk</button>
+      </form>
+    </div>
+  </div>`);
+}
+async function submitReport(e) {
+  e.preventDefault();
+  if (!sb) return toast('Supabase SDK gagal dimuat. Periksa koneksi internet.', true);
+  let last = 0; try { last = +localStorage.getItem('helpdesk_last_report') || 0; } catch (x) {}
+  if (Date.now() - last < 30000) return toast('Mohon tunggu beberapa detik sebelum mengirim laporan lagi.', true);
+  const btn = $('r-btn'); setBusy(btn, true, 'Mengirim...');
+  const row = {
+    pelanggan: $('r-nama').value.trim(),
+    lokasi: $('r-lokasi').value.trim(),
+    prioritas: document.querySelector('input[name=prio]:checked').value,
+    keluhan: $('r-keluhan').value.trim(),
+    status: 'Masuk',
+    teknisi_email: null,
+    foto_awal: pendingPhoto || null,
+  };
+  try {
+    let no = null;
+    const r1 = await sb.from(T_TICKETS).insert(row).select().single();
+    if (r1.error) {
+      // Jika hanya pembacaan-kembali yang diblokir RLS, insert dibatalkan; coba lagi tanpa select
+      if (r1.error.code !== '42501') throw r1.error;
+      const r2 = await sb.from(T_TICKETS).insert(row);
+      if (r2.error) throw r2.error;
+    } else no = tno(r1.data);
+    try { localStorage.setItem('helpdesk_last_report', String(Date.now())); } catch (x) {}
+    pendingPhoto = null; S.submitted = { no }; render(); window.scrollTo(0, 0);
+  } catch (err) { dbErr(err, 'Gagal mengirim laporan'); setBusy(btn, false); }
+}
+function copyText(t) { try { navigator.clipboard.writeText(t); toast('Nomor tiket disalin'); } catch (e) { toast('Salin manual: ' + t); } }
+
+/* ---------- login ---------- */
+async function doLogin(e) {
+  e.preventDefault();
+  if (!sb) return toast('Supabase SDK gagal dimuat. Periksa koneksi internet.', true);
+  const email = $('l-email').value.trim();
+  const btn = $('l-btn'); setBusy(btn, true, 'Memeriksa...');
+  try {
+    const row = await findEmployee(email);
+    if (!row) { setBusy(btn, false); return toast('Email tidak terdaftar sebagai karyawan', true); }
+    const role = roleOf(row['Jabatan']);
+    if (!role) { setBusy(btn, false); return toast(`Jabatan "${row['Jabatan']}" belum memiliki akses dashboard`, true); }
+    S.user = rowToUser(row, role);
+    try { localStorage.setItem(SESSION_KEY, row.email); } catch (x) {}
+    S.view = 'dash'; S.techTab = 'aktif'; S.filter = 'Semua'; S.q = ''; S.sig = ''; S.tickets = []; S.emps = [];
+    toast(`Selamat datang, ${S.user.nama}`);
+    await loadData();
+  } catch (err) { dbErr(err, 'Login gagal'); setBusy(btn, false); }
+}
+async function restoreSession() {
+  if (!S.booting) return;
+  try {
+    let em = null; try { em = localStorage.getItem(SESSION_KEY); } catch (e) {}
+    const row = em ? await findEmployee(em) : null;
+    const role = row && roleOf(row['Jabatan']);
+    if (role) { S.user = rowToUser(row, role); S.view = 'dash'; S.booting = false; await loadData(); return; }
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+  } catch (e) { dbErr(e, 'Gagal memulihkan sesi'); }
+  S.booting = false; render();
+}
+function logout() {
+  try { localStorage.removeItem(SESSION_KEY); } catch (e) {}
+  S.user = null; S.tickets = []; S.emps = []; S.sig = ''; S.view = 'home'; S.q = ''; S.filter = 'Semua'; pendingPhoto = null;
+  closeModal(); render(); window.scrollTo(0, 0);
+}
+
+/* =====================================================
+   PROFIL: GANTI FOTO
+   ===================================================== */
+function openProfile() {
+  const u = S.user;
+  openModal(`${modalHead('Pengaturan Profil', 'Ganti foto profil Anda')}
+  <div class="p-5 space-y-5">
+    <div class="flex flex-col items-center gap-3">
+      <div id="p-prev" class="relative">${avatar(u.foto, u.nama, 'w-28 h-28', 'text-3xl')}</div>
+      <label class="${btnG} cursor-pointer">${icon('camera', 'w-4 h-4')}Pilih Foto Baru<input type="file" accept="image/*" class="hidden" onchange="onProfilePick(this)"></label>
+    </div>
+    <div class="rounded-2xl bg-slate-50 p-4 text-sm grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
+      <span class="text-slate-400">Nama</span><b>${esc(u.nama)}</b>
+      <span class="text-slate-400">Email</span><span class="break-all">${esc(u.email)}</span>
+      <span class="text-slate-400">Jabatan</span><span>${esc(u.jabatan)}</span>
+      <span class="text-slate-400">Kode</span><span>${esc(u.kode) || '-'}</span>
+      <span class="text-slate-400">Supervisor</span><span>${esc(u.supervisor) || '-'}</span>
+    </div>
+    <div class="flex flex-wrap gap-2 justify-end">
+      ${isImg(u.foto) ? `<button onclick="saveProfilePhoto(true,this)" class="${btnG} !text-red-600">${icon('trash-2', 'w-4 h-4')}Hapus Foto</button>` : ''}
+      <button onclick="closeModal()" class="${btnG}">Batal</button>
+      <button onclick="saveProfilePhoto(false,this)" class="${btnP}">${icon('save', 'w-4 h-4')}Simpan Foto</button>
+    </div>
+  </div>`);
+}
+async function onProfilePick(input) {
+  const f = input.files && input.files[0]; if (!f) return;
+  try {
+    pendingPhoto = await readPhoto(f, 320, true);
+    $('p-prev').innerHTML = `<img src="${pendingPhoto}" class="w-28 h-28 rounded-full object-cover ring-4 ring-indigo-200 shadow">`;
+  } catch (e) { toast('Gagal membaca foto. Coba format JPG atau PNG.', true); }
+}
+async function saveProfilePhoto(remove, btn) {
+  if (!remove && !pendingPhoto) return toast('Pilih foto terlebih dahulu', true);
+  const val = remove ? null : pendingPhoto;
+  setBusy(btn, true, 'Menyimpan...');
+  try {
+    const { data, error } = await sb.from(T_USERS).update({ foto_profil: val }).eq('email', S.user.email).select();
+    if (error) throw error;
+    if (!data || !data.length) throw new Error('Tidak ada baris yang berubah (kemungkinan diblokir kebijakan RLS)');
+    S.user.foto = val; closeModal();
+    toast(remove ? 'Foto profil dihapus' : 'Foto profil diperbarui');
+    if (S.user.role !== 'teknisi') await loadData(true); else render();
+  } catch (e) { dbErr(e, 'Gagal menyimpan foto'); setBusy(btn, false); }
+}
+
+/* =====================================================
+   SHELL DASHBOARD (tanpa banner / branding judul)
+   ===================================================== */
+function dashShell(body, badge) {
+  const u = S.user;
+  return `
+  <header class="sticky top-0 z-30 bg-white/85 backdrop-blur-xl border-b border-slate-200">
+    <div class="max-w-6xl mx-auto px-3 sm:px-4 h-16 flex items-center justify-between gap-2">
+      <button onclick="openProfile()" aria-label="Buka pengaturan profil" class="flex items-center gap-3 rounded-2xl pr-3 py-1 hover:bg-slate-100 transition min-w-0">
+        <span class="relative shrink-0">${avatar(u.foto, u.nama, 'w-11 h-11')}<span class="absolute -bottom-0.5 -right-0.5 w-5 h-5 rounded-full bg-indigo-600 text-white grid place-items-center ring-2 ring-white">${icon('camera', 'w-2.5 h-2.5')}</span></span>
+        <span class="text-left leading-tight min-w-0"><span class="block text-sm font-semibold truncate max-w-[40vw] sm:max-w-[260px]">${esc(u.nama)}</span><span class="inline-block mt-0.5 text-[11px] font-semibold px-2 py-0.5 rounded-full ${ROLE_BADGE[u.role]}">${esc(u.jabatan)}</span></span>
+      </button>
+      <div class="flex items-center gap-2 sm:gap-3 shrink-0">
+        ${badge ? `<span class="relative text-slate-600 mr-1" title="Notifikasi baru">${icon('bell', 'w-5 h-5')}<span class="absolute -top-1.5 -right-2 min-w-[18px] h-[18px] px-1 rounded-full bg-red-500 text-white text-[10px] font-bold grid place-items-center">${badge}</span></span>` : ''}
+        <button onclick="manualRefresh()" aria-label="Muat ulang data" title="Muat ulang data" class="${btnG} !px-3 !py-2.5">${icon('refresh-cw', 'w-4 h-4 ' + (S.loading ? 'animate-spin' : ''))}</button>
+        <button onclick="logout()" aria-label="Keluar" title="Keluar" class="${btnG} !px-3 !py-2.5">${icon('log-out', 'w-4 h-4')}<span class="hidden sm:inline">Keluar</span></button>
+      </div>
+    </div>
+  </header>
+  <main class="max-w-6xl mx-auto px-3 sm:px-4 py-5 pb-24 fade-in">${body}</main>`;
+}
+const statCard = (label, val, ic, tone, sub) => `
+  <div class="bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm">
+    <div class="flex items-center justify-between"><span class="text-sm text-slate-500">${label}</span><span class="w-9 h-9 rounded-xl grid place-items-center ${tone}">${icon(ic, 'w-4 h-4')}</span></div>
+    <div class="text-3xl font-extrabold mt-2">${val}</div>${sub ? `<div class="text-xs text-slate-400 mt-0.5">${sub}</div>` : ''}
+  </div>`;
+const teknisiList = () => S.emps.filter(r => roleOf(r['Jabatan']) === 'teknisi');
+const empByEmail = (email) => S.emps.find(x => norm(x.email) === norm(email));
+const techName = (email) => { if (!email) return '-'; const r = empByEmail(email); return r ? (r['Nama'] || email) : email; };
+const emptyBox = (ic, m) => `<div class="bg-white rounded-2xl border border-dashed border-slate-300 p-8 text-center text-slate-400 flex flex-col items-center gap-2">${icon(ic, 'w-8 h-8')}<span>${m}</span></div>`;
+const sectionTitle = (ic, t, extra) => `<div class="flex items-center gap-2 mb-3"><span class="text-indigo-600">${icon(ic, 'w-5 h-5')}</span><h2 class="text-lg font-bold">${t}</h2>${extra || ''}</div>`;
+
+/* ---------- monitoring tiket (tabel desktop + kartu mobile, dengan filter & pencarian) ---------- */
+const dateCell = (ts) => ts ? `<div class="whitespace-nowrap">${fmt(ts)}</div><div class="text-xs text-slate-400">${rel(ts)}</div>` : '<span class="text-slate-400">-</span>';
+const monitorRow = (t) => `
+  <tr class="hover:bg-slate-50">
+    <td class="px-4 py-3"><div class="font-mono text-xs text-slate-400 mb-1">${tno(t)}</div>${prioBadge(t.prioritas)}</td>
+    <td class="px-4 py-3 max-w-[220px]"><div class="font-semibold">${esc(t.pelanggan)}</div><div class="text-xs text-slate-500 truncate">${esc(t.keluhan)}</div></td>
+    <td class="px-4 py-3">${t.teknisi_email ? `<div class="flex items-center gap-2">${avatar((empByEmail(t.teknisi_email) || {}).foto_profil, techName(t.teknisi_email), 'w-8 h-8', 'text-xs')}<span class="font-medium">${esc(techName(t.teknisi_email))}</span></div>` : '<span class="text-slate-400">Belum ditugaskan</span>'}</td>
+    <td class="px-4 py-3"><div class="mb-1.5">${statusBadge(t.status)}</div>${stepper(t.status)}</td>
+    <td class="px-4 py-3">${dateCell(t.created_at)}</td>
+    <td class="px-4 py-3">${dateCell(t.completed_at)}</td>
+    <td class="px-4 py-3">${thumb(t, 'foto_awal')}</td>
+    <td class="px-4 py-3">${thumb(t, 'foto_bukti')}</td>
+    <td class="px-4 py-3 text-right"><button onclick="viewTicket('${esc(t.id)}')" class="inline-flex items-center gap-1 text-indigo-600 font-semibold hover:bg-indigo-50 px-3 py-1.5 rounded-lg">${icon('eye', 'w-4 h-4')}Detail</button></td>
+  </tr>`;
+const monitorCard = (t) => `
+  <article class="bg-white rounded-2xl border border-slate-200 border-l-4 ${(PRIO[t.prioritas] || PRIO.Normal).bar} p-4 shadow-sm">
+    <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="text-xs font-mono text-slate-400">${tno(t)}</div><h3 class="font-bold truncate">${esc(t.pelanggan)}</h3></div>${prioBadge(t.prioritas)}</div>
+    <p class="text-sm text-slate-600 mt-1.5 line-clamp-2">${esc(t.keluhan)}</p>
+    <div class="mt-2 text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-0.5"><span>Request: ${fmt(t.created_at)}</span>${t.completed_at ? `<span>Selesai: ${fmt(t.completed_at)}</span>` : ''}</div>
+    <div class="mt-3 flex items-center justify-between gap-2">
+      <div class="flex items-center gap-2 min-w-0">${t.teknisi_email ? `${avatar((empByEmail(t.teknisi_email) || {}).foto_profil, techName(t.teknisi_email), 'w-7 h-7', 'text-[10px]')}<span class="text-sm font-medium truncate">${esc(techName(t.teknisi_email))}</span>` : '<span class="text-sm text-slate-400">Belum ditugaskan</span>'}</div>
+      ${statusBadge(t.status)}
+    </div>
+    <div class="mt-2.5 flex items-center justify-between">${stepper(t.status)}<button onclick="viewTicket('${esc(t.id)}')" class="inline-flex items-center gap-1 text-sm text-indigo-600 font-semibold">${icon('eye', 'w-4 h-4')}Detail</button></div>
+  </article>`;
+const monChips = () => ['Semua', ...STEPS].map(s => {
+  const n = s === 'Semua' ? S.tickets.length : S.tickets.filter(t => t.status === s).length, on = S.filter === s;
+  return `<button onclick="setFilter('${s}')" class="whitespace-nowrap px-3.5 py-2 rounded-full text-sm font-semibold transition ${on ? 'bg-indigo-600 text-white shadow' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'}">${s} <span class="${on ? 'text-indigo-200' : 'text-slate-400'} font-medium">${n}</span></button>`;
+}).join('');
+function monitorMatches(t) {
+  if (S.filter !== 'Semua' && t.status !== S.filter) return false;
+  const q = norm(S.q); if (!q) return true;
+  return [tno(t), t.pelanggan, t.keluhan, t.lokasi, t.prioritas, t.status, t.feedback, techName(t.teknisi_email)].some(v => norm(v).includes(q));
+}
+function renderMonitor() {
+  const tb = $('mon-body'); if (!tb) return;
+  const f = S.tickets.filter(monitorMatches);
+  tb.innerHTML = f.length ? f.map(monitorRow).join('') : `<tr><td colspan="9" class="px-4 py-10 text-center text-slate-400">Tidak ada tiket yang cocok</td></tr>`;
+  $('mon-cards').innerHTML = f.length ? f.map(monitorCard).join('') : emptyBox('search-x', 'Tidak ada tiket yang cocok');
+  $('mon-chips').innerHTML = monChips();
+  $('mon-count').textContent = `${f.length} dari ${S.tickets.length} tiket`;
+  refreshIcons();
+}
+function setFilter(s) { S.filter = s; renderMonitor(); }
+function onMonSearch(v) { S.q = v; renderMonitor(); }
+const ticketMonitor = () => `
+  ${sectionTitle('activity', 'Monitoring Tiket')}
+  <div class="flex flex-col sm:flex-row sm:items-center gap-2.5 mb-2">
+    <div class="relative sm:w-72 shrink-0"><span class="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">${icon('search', 'w-4 h-4')}</span>
+      <input id="mon-q" type="search" value="${esc(S.q)}" oninput="onMonSearch(this.value)" placeholder="Cari tiket, pelanggan, teknisi, feedback..." class="${inp} !pl-10"></div>
+    <div id="mon-chips" class="flex gap-1.5 overflow-x-auto no-scrollbar -mx-3 px-3 sm:mx-0 sm:px-0 pb-1"></div>
+  </div>
+  <div id="mon-count" class="text-xs text-slate-400 mb-2"></div>
+  <div class="hidden md:block bg-white rounded-2xl border border-slate-200 overflow-x-auto shadow-sm">
+    <table class="w-full text-sm min-w-[1060px]">
+      <thead class="bg-slate-50 text-left text-slate-500"><tr><th class="px-4 py-3">Tiket</th><th class="px-4 py-3">Pelanggan</th><th class="px-4 py-3">Teknisi</th><th class="px-4 py-3">Status</th><th class="px-4 py-3">Tgl Request</th><th class="px-4 py-3">Tgl Selesai</th><th class="px-4 py-3">Foto Awal</th><th class="px-4 py-3">Foto Bukti</th><th class="px-4 py-3"></th></tr></thead>
+      <tbody id="mon-body" class="divide-y divide-slate-100"></tbody>
+    </table>
+  </div>
+  <div id="mon-cards" class="md:hidden grid gap-3"></div>`;
+
+function fmtDur(ms) {
+  const m = Math.max(0, Math.round(ms / 60000));
+  if (m < 1) return 'kurang dari 1 menit';
+  if (m < 60) return m + ' menit';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + ' jam ' + (m % 60) + ' menit';
+  return Math.floor(h / 24) + ' hari ' + (h % 24) + ' jam';
+}
+function viewTicket(id) {
+  const t = S.tickets.find(x => String(x.id) === String(id)); if (!t) return;
+  const photo = (src, label) => `<div><div class="text-xs font-semibold text-slate-500 mb-1.5">${label}</div>${isImg(src) ? `<img src="${esc(src)}" onclick="viewImg(this.src)" class="rounded-2xl w-full h-40 object-cover cursor-zoom-in">` : '<div class="h-40 rounded-2xl bg-slate-100 grid place-items-center text-slate-400 text-xs">Belum ada</div>'}</div>`;
+  const dur = t.completed_at && t.created_at ? fmtDur(new Date(t.completed_at) - new Date(t.created_at)) : null;
+  openModal(`${modalHead(`${tno(t)} · ${esc(t.pelanggan)}`, `Teknisi: ${esc(techName(t.teknisi_email))}`)}
+  <div class="p-5 space-y-4 text-sm">
+    <div class="flex gap-2 flex-wrap">${prioBadge(t.prioritas)}${statusBadge(t.status)}</div>
+    <div class="rounded-2xl bg-slate-50 p-4 space-y-2"><p>${esc(t.keluhan)}</p><p class="text-slate-500 flex gap-1.5">${icon('map-pin', 'w-4 h-4 mt-0.5 shrink-0')}${esc(t.lokasi)}</p></div>
+    <div class="grid grid-cols-2 gap-3">
+      <div class="rounded-2xl border border-slate-200 p-3"><div class="text-xs font-semibold text-slate-400 uppercase">Tanggal Request</div><div class="font-semibold mt-0.5">${fmt(t.created_at)}</div><div class="text-xs text-slate-400">${rel(t.created_at)}</div></div>
+      <div class="rounded-2xl border ${t.completed_at ? 'border-emerald-200 bg-emerald-50/50' : 'border-slate-200'} p-3"><div class="text-xs font-semibold text-slate-400 uppercase">Tanggal Selesai</div><div class="font-semibold mt-0.5">${t.completed_at ? fmt(t.completed_at) : 'Belum selesai'}</div>${dur ? `<div class="text-xs text-emerald-600">Durasi ${dur}</div>` : ''}</div>
+    </div>
+    <div class="grid grid-cols-2 gap-3">${photo(t.foto_awal, 'Foto Awal')}${photo(t.foto_bukti, 'Foto Bukti Perbaikan')}</div>
+    <div class="rounded-2xl border ${t.feedback ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-slate-50'} p-4">
+      <div class="flex items-center gap-1.5 text-xs font-semibold uppercase ${t.feedback ? 'text-emerald-700' : 'text-slate-400'}">${icon('message-square-text', 'w-4 h-4')}Feedback / Ulasan</div>
+      <p class="mt-1.5 whitespace-pre-line">${t.feedback ? esc(t.feedback) : '<span class="text-slate-400">Belum ada feedback.</span>'}</p>
+    </div>
+  </div>`, true);
+}
+
+/* =====================================================
+   ADMIN (statistik, CRUD karyawan, monitoring tiket)
+   ===================================================== */
+const JABATAN_OPTS = ['Admin', 'Manager operasional', 'Kepala Teknisi', 'Teknisi'];
+// Kolom pengenal baris tabel ardi: id jika ada, jika tidak "Kode Karyawan", jika tidak email
+function empFilter(r) {
+  if (r.id !== undefined && r.id !== null) return ['id', r.id];
+  if (r['Kode Karyawan']) return ['Kode Karyawan', r['Kode Karyawan']];
+  return ['email', r.email];
+}
+let empEditing = null;
+const isSelf = (r) => !!r && norm(r.email) === norm(S.user.email);
+
+function adminView() {
+  const T = S.tickets, done = T.filter(t => t.status === 'Selesai').length;
+  const busy = new Set(T.filter(t => ['Ditugaskan', 'Proses'].includes(t.status) && t.teknisi_email).map(t => norm(t.teknisi_email))).size;
+  const actions = (r, i) => isSelf(r)
+    ? `<button onclick="openEmpForm(${i})" class="inline-flex items-center gap-1 text-indigo-600 font-semibold hover:bg-indigo-50 px-3 py-1.5 rounded-lg">${icon('pencil', 'w-4 h-4')}Edit</button><span class="text-xs text-slate-400 px-2">Akun Anda</span>`
+    : `<button onclick="openEmpForm(${i})" class="inline-flex items-center gap-1 text-indigo-600 font-semibold hover:bg-indigo-50 px-3 py-1.5 rounded-lg">${icon('pencil', 'w-4 h-4')}Edit</button><button onclick="openEmpDelete(${i})" class="inline-flex items-center gap-1 text-rose-600 font-semibold hover:bg-rose-50 px-3 py-1.5 rounded-lg">${icon('trash-2', 'w-4 h-4')}Hapus</button>`;
+  const empCard = (r, i) => { const ro = roleOf(r['Jabatan']); return `
+    <div class="bg-white rounded-2xl border border-slate-200 p-3.5 shadow-sm">
+      <div class="flex items-center gap-3">
+        ${avatar(r.foto_profil, emp(r, 'Nama'), 'w-11 h-11', 'text-sm')}
+        <div class="min-w-0 flex-1"><div class="font-semibold truncate">${esc(emp(r, 'Nama'))}</div><div class="text-xs text-slate-500 truncate">${esc(r.email)}</div><div class="text-xs text-slate-400 truncate">${esc(emp(r, 'Kode Karyawan')) || '-'} · Spv: ${esc(emp(r, 'Supervisor')) || '-'}</div></div>
+        <span class="shrink-0 max-w-[38%] text-center px-2.5 py-1 rounded-full text-[11px] font-semibold ${ro ? ROLE_BADGE[ro] : 'bg-slate-100 text-slate-500'}">${esc(emp(r, 'Jabatan'))}</span>
+      </div>
+      <div class="mt-2.5 pt-2.5 border-t border-slate-100 flex justify-end gap-1">${actions(r, i)}</div>
+    </div>`; };
+  return `
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+    ${statCard('Total Laporan', T.length, 'inbox', 'bg-indigo-100 text-indigo-600')}
+    ${statCard('Selesai', done, 'circle-check', 'bg-emerald-100 text-emerald-600')}
+    ${statCard('Pending', T.length - done, 'hourglass', 'bg-amber-100 text-amber-600')}
+    ${statCard('Teknisi', teknisiList().length, 'hard-hat', 'bg-sky-100 text-sky-600', `${busy} sedang bertugas`)}
+  </div>
+
+  <div class="mt-4 bg-white rounded-2xl border border-slate-200 p-4 sm:p-5 shadow-sm">
+    <div class="font-bold mb-3">Distribusi Status</div>
+    <div class="grid sm:grid-cols-2 gap-x-8 gap-y-3">${STEPS.map(s => { const n = T.filter(t => t.status === s).length, pct = T.length ? Math.round(n / T.length * 100) : 0; return `
+      <div><div class="flex justify-between text-sm mb-1"><span class="text-slate-600">${s}</span><span class="font-semibold">${n} <span class="text-slate-400 font-normal">(${pct}%)</span></span></div>
+      <div class="h-2 rounded-full bg-slate-100"><div class="h-2 rounded-full ${STATUS_BAR[s]}" style="width:${pct}%"></div></div></div>`; }).join('')}</div>
+  </div>
+
+  <section class="mt-8">
+    <div class="flex flex-wrap items-end justify-between gap-2">
+      ${sectionTitle('users', 'Manajemen Karyawan', `<span class="text-sm text-slate-400">(${S.emps.length})</span>`)}
+      <button onclick="openEmpForm(null)" class="${btnP} mb-3">${icon('user-plus', 'w-4 h-4')}Tambah Karyawan Baru</button>
+    </div>
+    <div class="hidden md:block bg-white rounded-2xl border border-slate-200 overflow-x-auto shadow-sm">
+      <table class="w-full text-sm min-w-[780px]">
+        <thead class="bg-slate-50 text-left text-slate-500"><tr><th class="px-4 py-3">Karyawan</th><th class="px-4 py-3">Kode</th><th class="px-4 py-3">Email</th><th class="px-4 py-3">Jabatan</th><th class="px-4 py-3">Supervisor</th><th class="px-4 py-3 text-right">Aksi</th></tr></thead>
+        <tbody class="divide-y divide-slate-100">${S.emps.length ? S.emps.map((r, i) => { const ro = roleOf(r['Jabatan']); return `<tr class="hover:bg-slate-50">
+          <td class="px-4 py-3"><div class="flex items-center gap-3">${avatar(r.foto_profil, emp(r, 'Nama'), 'w-9 h-9', 'text-xs')}<span class="font-semibold">${esc(emp(r, 'Nama'))}</span></div></td>
+          <td class="px-4 py-3 font-mono text-xs text-slate-500">${esc(emp(r, 'Kode Karyawan'))}</td>
+          <td class="px-4 py-3 text-slate-600">${esc(r.email)}</td>
+          <td class="px-4 py-3"><span class="px-2.5 py-1 rounded-full text-xs font-semibold ${ro ? ROLE_BADGE[ro] : 'bg-slate-100 text-slate-500'}">${esc(emp(r, 'Jabatan'))}</span></td>
+          <td class="px-4 py-3 text-slate-600">${esc(emp(r, 'Supervisor')) || '-'}</td>
+          <td class="px-4 py-3"><div class="flex items-center justify-end gap-1">${actions(r, i)}</div></td></tr>`; }).join('') : `<tr><td colspan="6" class="px-4 py-8 text-center text-slate-400">Belum ada data karyawan</td></tr>`}</tbody>
+      </table>
+    </div>
+    <div class="md:hidden grid gap-2.5">${S.emps.length ? S.emps.map(empCard).join('') : emptyBox('users', 'Belum ada data karyawan')}</div>
+  </section>
+
+  <section class="mt-8">${ticketMonitor()}</section>`;
+}
+
+/* ---------- CRUD karyawan (tabel ardi) ---------- */
+function openEmpForm(i) {
+  const r = i === null ? null : S.emps[i];
+  empEditing = r;
+  const self = isSelf(r);
+  const val = (k) => r ? esc(r[k] ?? '') : '';
+  const jab = r ? (r['Jabatan'] || 'Teknisi') : 'Teknisi';
+  const opts = JABATAN_OPTS.includes(jab) ? JABATAN_OPTS : [jab, ...JABATAN_OPTS];
+  const names = [...new Set(S.emps.map(x => emp(x, 'Nama')).filter(Boolean))];
+  openModal(`${modalHead(r ? 'Edit Karyawan' : 'Tambah Karyawan Baru', r ? 'Ubah data karyawan' : 'Buat akun karyawan baru')}
+  <form onsubmit="saveEmp(event)" class="p-5 space-y-4">
+    <div class="grid sm:grid-cols-2 gap-4">
+      <div><label class="${lbl}">Kode Karyawan <span class="text-red-500">*</span></label><input id="e-kode" class="${inp}" required maxlength="30" value="${val('Kode Karyawan')}" placeholder="Contoh: KRY-001"></div>
+      <div><label class="${lbl}">Nama <span class="text-red-500">*</span></label><input id="e-nama" class="${inp}" required maxlength="100" value="${val('Nama')}" placeholder="Nama lengkap"></div>
+    </div>
+    <div><label class="${lbl}">Email <span class="text-red-500">*</span></label><input id="e-email" type="email" required class="${inp} ${self ? 'bg-slate-100 text-slate-500' : ''}" value="${val('email')}" autocapitalize="none" placeholder="nama@email.com" ${self ? 'readonly' : ''}></div>
+    <div class="grid sm:grid-cols-2 gap-4">
+      <div><label class="${lbl}">Jabatan <span class="text-red-500">*</span></label>
+        <select id="e-jab" class="${inp} ${self ? 'bg-slate-100 text-slate-500' : ''}" ${self ? 'disabled' : ''}>${opts.map(o => `<option ${o === jab ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>
+      <div><label class="${lbl}">Supervisor</label><input id="e-spv" list="e-spv-list" class="${inp}" maxlength="100" value="${val('Supervisor')}" placeholder="Nama atasan (opsional)">
+        <datalist id="e-spv-list">${names.map(n => `<option value="${esc(n)}"></option>`).join('')}</datalist></div>
+    </div>
+    <p class="text-xs text-slate-400">Akses dashboard mengikuti jabatan: Admin / Manager operasional = Admin, Kepala Teknisi = Dispatcher, Teknisi = Lapangan.${self ? ' Email dan jabatan akun Anda sendiri dikunci agar Anda tidak kehilangan akses.' : ''}</p>
+    <div class="flex gap-2 justify-end pt-1"><button type="button" onclick="closeModal()" class="${btnG}">Batal</button><button id="e-btn" class="${btnP}">${icon('save', 'w-4 h-4')}${r ? 'Simpan Perubahan' : 'Tambah Karyawan'}</button></div>
+  </form>`);
+}
+async function saveEmp(e) {
+  e.preventDefault();
+  const cur = empEditing, btn = $('e-btn');
+  const row = {
+    'Kode Karyawan': $('e-kode').value.trim(),
+    'Nama': $('e-nama').value.trim(),
+    email: $('e-email').value.trim(),
+    'Jabatan': $('e-jab').value,
+    'Supervisor': $('e-spv').value.trim() || null,
+  };
+  const others = S.emps.filter(x => x !== cur);
+  if (others.some(x => norm(x.email) === norm(row.email))) return toast('Email sudah dipakai karyawan lain', true);
+  if (others.some(x => norm(x['Kode Karyawan']) === norm(row['Kode Karyawan']))) return toast('Kode Karyawan sudah dipakai karyawan lain', true);
+  setBusy(btn, true, 'Menyimpan...');
+  try {
+    if (cur) {
+      const [col, v] = empFilter(cur);
+      const { data, error } = await sb.from(T_USERS).update(row).eq(col, v).select();
+      if (error) throw error;
+      if (!data || !data.length) throw new Error('Data tidak berubah (kemungkinan diblokir kebijakan RLS)');
+      // email berubah: pindahkan tiket yang sudah ditugaskan ke email baru agar tidak yatim
+      if (norm(cur.email) !== norm(row.email)) {
+        const t = await sb.from(T_TICKETS).update({ teknisi_email: row.email }).eq('teknisi_email', cur.email).select('id');
+        if (t.error) toast('Data tersimpan, tetapi tiket lama gagal dipindahkan ke email baru: ' + t.error.message, true);
+      }
+      if (isSelf(cur)) { S.user.nama = row['Nama'] || S.user.nama; S.user.kode = row['Kode Karyawan']; S.user.supervisor = row['Supervisor']; }
+    } else {
+      const { error } = await sb.from(T_USERS).insert(row);
+      if (error) throw error;
+    }
+    closeModal(); toast(cur ? 'Data karyawan diperbarui' : 'Karyawan baru ditambahkan'); await loadData(true);
+  } catch (err) { dbErr(err, cur ? 'Gagal menyimpan perubahan' : 'Gagal menambah karyawan'); setBusy(btn, false); }
+}
+function openEmpDelete(i) {
+  const r = S.emps[i]; if (!r) return;
+  if (isSelf(r)) return toast('Akun yang sedang dipakai tidak dapat dihapus', true);
+  const aktif = S.tickets.filter(t => norm(t.teknisi_email) === norm(r.email) && t.status !== 'Selesai').length;
+  if (aktif) return toast(`${emp(r, 'Nama')} masih memiliki ${aktif} tiket aktif. Selesaikan tiketnya dulu sebelum menghapus.`, true);
+  empEditing = r;
+  openModal(`${modalHead('Hapus Karyawan', 'Tindakan ini tidak dapat dibatalkan')}
+  <div class="p-5 space-y-4">
+    <div class="flex items-center gap-3 rounded-2xl bg-rose-50 border border-rose-100 p-4">${avatar(r.foto_profil, emp(r, 'Nama'), 'w-12 h-12', 'text-base')}
+      <div class="min-w-0"><div class="font-semibold truncate">${esc(emp(r, 'Nama'))}</div><div class="text-sm text-slate-500 truncate">${esc(r.email)} · ${esc(emp(r, 'Jabatan'))}</div></div></div>
+    <p class="text-sm text-slate-600">Data karyawan ini akan dihapus permanen dari database dan tidak bisa login lagi. Riwayat tiket yang pernah ia kerjakan tetap tersimpan.</p>
+    <div class="flex gap-2 justify-end"><button onclick="closeModal()" class="${btnG}">Batal</button><button onclick="confirmDeleteEmp(this)" class="${btnP} !bg-rose-600 hover:!bg-rose-700 !shadow-rose-600/20">${icon('trash-2', 'w-4 h-4')}Ya, Hapus</button></div>
+  </div>`);
+}
+async function confirmDeleteEmp(btn) {
+  const r = empEditing; if (!r) return;
+  setBusy(btn, true, 'Menghapus...');
+  try {
+    const [col, v] = empFilter(r);
+    const { data, error } = await sb.from(T_USERS).delete().eq(col, v).select();
+    if (error) throw error;
+    if (!data || !data.length) throw new Error('Data tidak terhapus (kemungkinan diblokir kebijakan RLS)');
+    closeModal(); toast('Karyawan dihapus'); await loadData(true);
+  } catch (err) { dbErr(err, 'Gagal menghapus karyawan'); setBusy(btn, false); }
+}
+
+/* =====================================================
+   KEPALA TEKNISI
+   ===================================================== */
+function kepalaView() {
+  const T = S.tickets;
+  const inbox = T.filter(t => t.status === 'Masuk').sort((a, b) => (PRIO[a.prioritas]?.w ?? 3) - (PRIO[b.prioritas]?.w ?? 3) || new Date(a.created_at) - new Date(b.created_at));
+  const darurat = inbox.filter(t => t.prioritas === 'Darurat').length;
+  const running = T.filter(t => ['Ditugaskan', 'Proses'].includes(t.status)).length;
+  const done = T.filter(t => t.status === 'Selesai').length;
+  const techs = teknisiList();
+  const cnt = (em, st) => T.filter(t => norm(t.teknisi_email) === norm(em) && t.status === st).length;
+  const load = (em) => cnt(em, 'Ditugaskan') + cnt(em, 'Proses');
+  const opts = techs.map(r => `<option value="${esc(r.email)}">${esc(emp(r, 'Nama'))} · ${load(r.email)} tugas aktif</option>`).join('');
+  return `
+  <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+    <div class="col-span-2 lg:col-span-1 rounded-2xl p-4 sm:p-5 shadow-sm ${inbox.length ? 'bg-gradient-to-br from-red-500 to-rose-600 text-white' : 'bg-white border border-slate-200'}">
+      <div class="flex items-center justify-between text-sm ${inbox.length ? 'text-red-100' : 'text-slate-500'}"><span>Laporan Masuk Baru</span>${icon('siren', 'w-5 h-5')}</div>
+      <div class="text-4xl font-extrabold mt-2">${inbox.length}</div>
+      <div class="text-xs mt-1 ${inbox.length ? 'text-red-100' : 'text-slate-400'}">${inbox.length ? `Belum ditugaskan${darurat ? ` · ${darurat} darurat` : ''}` : 'Semua sudah ditugaskan'}</div>
+    </div>
+    ${statCard('Sedang Berjalan', running, 'truck', 'bg-indigo-100 text-indigo-600')}
+    ${statCard('Selesai', done, 'circle-check', 'bg-emerald-100 text-emerald-600')}
+    ${statCard('Teknisi', techs.length, 'hard-hat', 'bg-sky-100 text-sky-600')}
+  </div>
+
+  <section class="mt-8">
+    ${sectionTitle('inbox', 'Laporan Masuk', inbox.length ? `<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">${inbox.length} baru</span>` : '')}
+    ${inbox.length ? `<div class="grid md:grid-cols-2 gap-3">${inbox.map(t => `
+      <article class="bg-white rounded-2xl border border-slate-200 border-l-4 ${(PRIO[t.prioritas] || PRIO.Normal).bar} p-4 shadow-sm">
+        <div class="flex items-start justify-between gap-2"><div class="min-w-0"><div class="text-xs text-slate-400 font-mono">${tno(t)}</div><h3 class="font-bold">${esc(t.pelanggan)}</h3></div>${prioBadge(t.prioritas)}</div>
+        <p class="text-sm text-slate-700 mt-2">${esc(t.keluhan)}</p>
+        <div class="mt-2 text-sm text-slate-500 space-y-1"><div class="flex gap-1.5">${icon('map-pin', 'w-4 h-4 mt-0.5 shrink-0')}${esc(t.lokasi)}</div><div class="flex gap-1.5">${icon('clock', 'w-4 h-4 mt-0.5 shrink-0')}${fmt(t.created_at)} · ${rel(t.created_at)}</div></div>
+        ${isImg(t.foto_awal) ? `<img src="${esc(t.foto_awal)}" onclick="viewImg(this.src)" class="mt-3 rounded-xl w-full max-h-40 object-cover cursor-zoom-in">` : ''}
+        <div class="mt-3 flex flex-col sm:flex-row gap-2">
+          <select id="qa-${esc(t.id)}" aria-label="Pilih teknisi" class="${inp} sm:flex-1"><option value="">Pilih teknisi...</option>${opts}</select>
+          <button onclick="quickAssign('${esc(t.id)}',this)" class="${btnP}">${icon('send', 'w-4 h-4')}Tugaskan</button>
+        </div>
+      </article>`).join('')}</div>` : emptyBox('party-popper', 'Tidak ada laporan baru.')}
+    ${techs.length ? '' : '<p class="text-xs text-red-600 mt-2">Belum ada karyawan berjabatan "Teknisi" di tabel ardi.</p>'}
+  </section>
+
+  <section class="mt-8">
+    ${sectionTitle('hard-hat', 'Progres Kerja Teknisi')}
+    <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">${techs.length ? techs.map(r => { const l = load(r.email); return `
+      <div class="bg-white rounded-2xl border border-slate-200 p-4 shadow-sm flex items-center gap-3">
+        ${avatar(r.foto_profil, emp(r, 'Nama'), 'w-12 h-12', 'text-base')}
+        <div class="min-w-0 flex-1"><div class="font-semibold truncate">${esc(emp(r, 'Nama'))}</div>
+          <div class="text-xs text-slate-500">Ditugaskan ${cnt(r.email, 'Ditugaskan')} · Proses ${cnt(r.email, 'Proses')} · Selesai ${cnt(r.email, 'Selesai')}</div></div>
+        <span class="text-xs font-bold px-2.5 py-1 rounded-full ${l ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'}">${l ? 'Bertugas' : 'Tersedia'}</span>
+      </div>`; }).join('') : `<div class="sm:col-span-2 lg:col-span-3">${emptyBox('users', 'Belum ada teknisi.')}</div>`}</div>
+  </section>
+
+  <section class="mt-8">${ticketMonitor()}</section>`;
+}
+async function quickAssign(id, btn) {
+  const sel = $('qa-' + id); const em = sel && sel.value;
+  if (!em) return toast('Pilih anggota teknisi dulu', true);
+  setBusy(btn, true, 'Mengirim...');
+  try {
+    await updateTicket(id, { teknisi_email: em, status: 'Ditugaskan' }, { status: 'Masuk' });
+    toast('Tugas terkirim ke ' + techName(em)); await loadData(true);
+  } catch (e) { dbErr(e, 'Gagal menugaskan'); setBusy(btn, false); loadData(true); }
+}
+
+/* =====================================================
+   ANGGOTA TEKNISI
+   ===================================================== */
+function nextAction(t) {
+  if (t.status === 'Ditugaskan') return { label: `${icon('check', 'w-5 h-5')}Terima Tugas`, cls: 'bg-blue-600 hover:bg-blue-700 shadow-blue-600/30', key: 'terima', show: 'Menunggu Diterima' };
+  if (t.status === 'Proses') {
+    if (stepStore.get(t.id) === 'berangkat') return { label: `${icon('flag', 'w-5 h-5')}Selesaikan Pekerjaan`, cls: 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/30', key: 'selesai', show: 'Di Perjalanan' };
+    return { label: `${icon('navigation', 'w-5 h-5')}Mulai Perjalanan`, cls: 'bg-indigo-600 hover:bg-indigo-700 shadow-indigo-600/30', key: 'berangkat', show: 'Diterima' };
+  }
+  return null;
+}
+function teknisiView() {
+  const u = S.user;
+  const mine = S.tickets.filter(t => norm(t.teknisi_email) === norm(u.email));
+  const active = mine.filter(t => t.status !== 'Selesai').sort((a, b) => (PRIO[a.prioritas]?.w ?? 3) - (PRIO[b.prioritas]?.w ?? 3) || new Date(a.created_at) - new Date(b.created_at));
+  const done = mine.filter(t => t.status === 'Selesai').sort((a, b) => new Date(b.completed_at || b.created_at) - new Date(a.completed_at || a.created_at));
+  const list = S.techTab === 'aktif' ? active : done;
+  const card = (t) => {
+    const n = nextAction(t);
+    return `
+    <article class="bg-white rounded-2xl border border-slate-200 border-l-4 ${(PRIO[t.prioritas] || PRIO.Normal).bar} p-4 sm:p-5 shadow-sm">
+      <div class="flex items-start justify-between gap-2">
+        <div class="min-w-0"><div class="text-xs font-mono text-slate-400">${tno(t)} · ${rel(t.created_at)}</div><h3 class="font-bold text-lg leading-tight">${esc(t.pelanggan)}</h3></div>${prioBadge(t.prioritas)}
+      </div>
+      <div class="mt-2 flex items-center gap-3">${statusBadge(t.status, n ? n.show : t.status)}${stepper(t.status)}</div>
+      <div class="mt-3 rounded-xl bg-slate-50 p-3 text-sm space-y-2">
+        <div><span class="text-xs font-semibold text-slate-400 uppercase">Kendala</span><p>${esc(t.keluhan)}</p></div>
+        <div><span class="text-xs font-semibold text-slate-400 uppercase">Lokasi</span><p class="flex gap-1.5">${icon('map-pin', 'w-4 h-4 mt-0.5 shrink-0')}${esc(t.lokasi)}</p></div>
+      </div>
+      ${isImg(t.foto_awal) ? `<div class="mt-3"><div class="text-xs font-semibold text-slate-500 mb-1.5">Foto kondisi awal</div><img src="${esc(t.foto_awal)}" onclick="viewImg(this.src)" class="rounded-xl w-full max-h-44 object-cover cursor-zoom-in"></div>` : ''}
+      ${t.status === 'Selesai' && isImg(t.foto_bukti) ? `<div class="mt-3"><div class="text-xs font-semibold text-emerald-700 mb-1.5">Foto bukti perbaikan</div><img src="${esc(t.foto_bukti)}" onclick="viewImg(this.src)" class="rounded-xl w-full max-h-44 object-cover cursor-zoom-in"></div>` : ''}
+      ${t.status === 'Selesai' ? `<div class="mt-3 rounded-xl bg-emerald-50 border border-emerald-100 p-3 text-sm"><div class="text-xs font-semibold text-emerald-700 mb-1">Selesai ${fmt(t.completed_at)}</div><p class="whitespace-pre-line text-slate-700">${esc(t.feedback) || '<span class="text-slate-400">Tanpa catatan</span>'}</p></div>` : ''}
+      ${t.status !== 'Selesai' ? `<a href="https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(t.lokasi || '')}" target="_blank" rel="noopener" class="${btnG} w-full mt-3">${icon('map', 'w-4 h-4')}Buka Peta</a>` : ''}
+      ${n ? `<button onclick="advance('${esc(t.id)}','${n.key}',this)" class="mt-2 w-full inline-flex items-center justify-center gap-2 rounded-xl py-3.5 text-white font-bold text-base shadow-lg transition active:scale-95 disabled:opacity-60 ${n.cls}">${n.label}</button>` : ''}
+    </article>`;
+  };
+  return `
+  <div class="grid grid-cols-3 gap-2.5 sm:gap-4 mb-5">
+    ${statCard('Tugas Baru', active.filter(t => t.status === 'Ditugaskan').length, 'bell-ring', 'bg-amber-100 text-amber-600')}
+    ${statCard('Aktif', active.length, 'wrench', 'bg-indigo-100 text-indigo-600')}
+    ${statCard('Selesai', done.length, 'circle-check', 'bg-emerald-100 text-emerald-600')}
+  </div>
+  <div class="flex gap-1.5 mb-4 bg-slate-200/60 p-1 rounded-2xl">
+    ${[['aktif', `Tugas Saya (${active.length})`], ['selesai', `Riwayat (${done.length})`]].map(([k, l]) => `<button onclick="S.techTab='${k}';render()" class="flex-1 py-2.5 rounded-xl text-sm font-semibold ${S.techTab === k ? 'bg-white shadow text-indigo-700' : 'text-slate-500'}">${l}</button>`).join('')}
+  </div>
+  <div class="grid md:grid-cols-2 gap-3">${list.length ? list.map(card).join('') : `<div class="md:col-span-2">${emptyBox('coffee', S.techTab === 'aktif' ? 'Belum ada tugas. Tunggu penugasan dari Kepala Teknisi.' : 'Belum ada riwayat pekerjaan.')}</div>`}</div>`;
+}
+async function advance(id, key, btn) {
+  if (key === 'selesai') return openFinish(id);
+  if (key === 'berangkat') { stepStore.set(id, 'berangkat'); toast('Selamat jalan! Hati-hati di perjalanan.'); return render(); }
+  if (btn) btn.disabled = true;
+  try {
+    await updateTicket(id, { status: 'Proses' }, { status: 'Ditugaskan', teknisi_email: S.user.email });
+    stepStore.set(id, 'diterima'); toast('Tugas diterima. Status: Proses'); await loadData(true);
+  } catch (e) { dbErr(e, 'Gagal menerima tugas'); if (btn) btn.disabled = false; loadData(true); }
+}
+function openFinish(id) {
+  const t = S.tickets.find(x => String(x.id) === String(id)); if (!t) return;
+  openModal(`${modalHead('Selesaikan Pekerjaan', `${tno(t)} · ${esc(t.pelanggan)}`)}
+  <div class="p-5 space-y-4">
+    <div><label class="${lbl}">Catatan Penyelesaian / Feedback <span class="text-red-500">*</span></label>
+      <textarea id="f-note" rows="4" maxlength="1000" class="${inp}" placeholder="Apa yang diperbaiki, sparepart yang dipakai, saran untuk pelanggan..."></textarea></div>
+    ${photoField('f-prev', 'Foto Bukti Perbaikan (opsional)', 'Gunakan kamera untuk memotret hasil pekerjaan')}
+    <div class="flex gap-2 justify-end pt-1"><button onclick="closeModal()" class="${btnG}">Batal</button><button onclick="finish('${esc(t.id)}',this)" class="${btnP} !bg-emerald-600 hover:!bg-emerald-700 !shadow-emerald-600/20">${icon('flag', 'w-4 h-4')}Selesaikan Pekerjaan</button></div>
+  </div>`);
+}
+async function finish(id, btn) {
+  const note = $('f-note').value.trim();
+  if (note.length < 5) return toast('Isi catatan penyelesaian terlebih dahulu (minimal 5 karakter)', true);
+  setBusy(btn, true, 'Menyimpan...');
+  try {
+    await updateTicket(id, { status: 'Selesai', foto_bukti: pendingPhoto || null, feedback: note, completed_at: new Date().toISOString() }, { status: 'Proses', teknisi_email: S.user.email });
+    stepStore.set(id, null); closeModal(); toast('Pekerjaan selesai. Terima kasih!'); S.techTab = 'aktif'; await loadData(true);
+  } catch (e) { dbErr(e, 'Gagal menyelesaikan'); setBusy(btn, false); loadData(true); }
+}
+
+/* ---------- ROUTER / RENDER ---------- */
+function render() {
+  const app = $('app');
+  if (S.booting) {
+    app.innerHTML = `<div class="min-h-screen grid place-items-center text-slate-400"><div class="flex flex-col items-center gap-3">${spinner}<span class="text-sm">Memulihkan sesi...</span></div></div>`;
+    return;
+  }
+  // simpan kondisi input agar auto-refresh tidak mengganggu pengguna
+  const keep = {}; app.querySelectorAll('select[id^="qa-"]').forEach(s => { if (s.value) keep[s.id] = s.value; });
+  const ae = document.activeElement, hadFocus = ae && ae.id === 'mon-q', pos = hadFocus ? ae.selectionStart : null;
+  const scrollY = window.scrollY;
+  const inDash = !!(S.user && S.view === 'dash');
+  if (inDash) {
+    if (S.loading && !S.tickets.length) {
+      app.innerHTML = dashShell(`<div class="py-24 text-center text-slate-400 flex flex-col items-center gap-3">${spinner}Memuat data dari Supabase...</div>`, 0);
+      refreshIcons(); return;
+    }
+    let body, badge = 0;
+    if (S.user.role === 'admin') body = adminView();
+    else if (S.user.role === 'kepala') { body = kepalaView(); badge = S.tickets.filter(t => t.status === 'Masuk').length; }
+    else { body = teknisiView(); badge = S.tickets.filter(t => t.status === 'Ditugaskan').length; }
+    app.innerHTML = dashShell(body, badge);
+  } else {
+    app.innerHTML = S.view === 'lapor' ? laporView() : S.view === 'login' ? loginView() : homeView();
+  }
+  Object.keys(keep).forEach(id => { const el = $(id); if (el) el.value = keep[id]; });
+  renderMonitor();
+  refreshIcons();
+  if (hadFocus) { const el = $('mon-q'); if (el) { el.focus(); try { el.setSelectionRange(pos, pos); } catch (e) {} } }
+  const key = inDash ? 'dash' : 'v-' + S.view + (S.submitted ? '-ok' : '');
+  if (render._k === key) window.scrollTo(0, scrollY);
+  render._k = key;
+}
+
+// Auto-refresh tiap 30 detik saat dashboard terbuka, tab terlihat, dan tidak ada modal
+setInterval(() => { if (S.user && S.view === 'dash' && !document.hidden && !$('modal-root').innerHTML) loadData(true); }, REFRESH_MS);
+document.addEventListener('visibilitychange', () => { if (!document.hidden && S.user && S.view === 'dash' && !$('modal-root').innerHTML) loadData(true); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && $('modal-root').innerHTML) closeModal(); });
+
+window.addEventListener('load', () => {
+  if (!sb) toast('Supabase SDK gagal dimuat. Periksa koneksi internet.', true);
+  let has = false; try { has = !!localStorage.getItem(SESSION_KEY); } catch (e) {}
+  S.booting = !!(has && sb);
+  render(); restoreSession();
+});
+</script>
+</body>
+</html>
